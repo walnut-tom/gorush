@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/appleboy/go-fcm"
@@ -29,16 +30,18 @@ const (
 
 // Alert is APNs payload
 type Alert struct {
-	Action       string   `json:"action,omitempty"`
-	ActionLocKey string   `json:"action-loc-key,omitempty"`
-	Body         string   `json:"body,omitempty"`
-	LaunchImage  string   `json:"launch-image,omitempty"`
-	LocArgs      []string `json:"loc-args,omitempty"`
-	LocKey       string   `json:"loc-key,omitempty"`
-	Title        string   `json:"title,omitempty"`
-	Subtitle     string   `json:"subtitle,omitempty"`
-	TitleLocArgs []string `json:"title-loc-args,omitempty"`
-	TitleLocKey  string   `json:"title-loc-key,omitempty"`
+	Action          string   `json:"action,omitempty"`
+	ActionLocKey    string   `json:"action-loc-key,omitempty"`
+	Body            string   `json:"body,omitempty"`
+	LaunchImage     string   `json:"launch-image,omitempty"`
+	LocArgs         []string `json:"loc-args,omitempty"`
+	LocKey          string   `json:"loc-key,omitempty"`
+	Title           string   `json:"title,omitempty"`
+	Subtitle        string   `json:"subtitle,omitempty"`
+	TitleLocArgs    []string `json:"title-loc-args,omitempty"`
+	TitleLocKey     string   `json:"title-loc-key,omitempty"`
+	SummaryArg      string   `json:"summary-arg,omitempty"`
+	SummaryArgCount int      `json:"summary-arg-count,omitempty"`
 }
 
 // RequestPush support multiple notification request.
@@ -49,15 +52,16 @@ type RequestPush struct {
 // PushNotification is single notification request
 type PushNotification struct {
 	// Common
-	Tokens           []string `json:"tokens" binding:"required"`
-	Platform         int      `json:"platform" binding:"required"`
-	Message          string   `json:"message,omitempty"`
-	Title            string   `json:"title,omitempty"`
-	Priority         string   `json:"priority,omitempty"`
-	ContentAvailable bool     `json:"content_available,omitempty"`
-	Sound            string   `json:"sound,omitempty"`
-	Data             D        `json:"data,omitempty"`
-	Retry            int      `json:"retry,omitempty"`
+	Tokens           []string    `json:"tokens" binding:"required"`
+	Platform         int         `json:"platform" binding:"required"`
+	Message          string      `json:"message,omitempty"`
+	Title            string      `json:"title,omitempty"`
+	Priority         string      `json:"priority,omitempty"`
+	ContentAvailable bool        `json:"content_available,omitempty"`
+	MutableContent   bool        `json:"mutable_content,omitempty"`
+	Sound            interface{} `json:"sound,omitempty"`
+	Data             D           `json:"data,omitempty"`
+	Retry            int         `json:"retry,omitempty"`
 	wg               *sync.WaitGroup
 	log              *[]LogPushEntry
 
@@ -69,17 +73,23 @@ type PushNotification struct {
 	TimeToLive            *uint            `json:"time_to_live,omitempty"`
 	RestrictedPackageName string           `json:"restricted_package_name,omitempty"`
 	DryRun                bool             `json:"dry_run,omitempty"`
+	Condition             string           `json:"condition,omitempty"`
 	Notification          fcm.Notification `json:"notification,omitempty"`
 
 	// iOS
-	Expiration     int64    `json:"expiration,omitempty"`
-	ApnsID         string   `json:"apns_id,omitempty"`
-	Topic          string   `json:"topic,omitempty"`
-	Badge          *int     `json:"badge,omitempty"`
-	Category       string   `json:"category,omitempty"`
-	URLArgs        []string `json:"url-args,omitempty"`
-	Alert          Alert    `json:"alert,omitempty"`
-	MutableContent bool     `json:"mutable-content,omitempty"`
+	Expiration  int64    `json:"expiration,omitempty"`
+	ApnsID      string   `json:"apns_id,omitempty"`
+	CollapseID  string   `json:"collapse_id,omitempty"`
+	Topic       string   `json:"topic,omitempty"`
+	Badge       *int     `json:"badge,omitempty"`
+	Category    string   `json:"category,omitempty"`
+	ThreadID    string   `json:"thread-id,omitempty"`
+	URLArgs     []string `json:"url-args,omitempty"`
+	Alert       Alert    `json:"alert,omitempty"`
+	Production  bool     `json:"production,omitempty"`
+	Development bool     `json:"development,omitempty"`
+	SoundName   string   `json:"name,omitempty"`
+	SoundVolume float32  `json:"volume,omitempty"`
 }
 
 // WaitDone decrements the WaitGroup counter.
@@ -103,11 +113,19 @@ func (p *PushNotification) AddLog(log LogPushEntry) {
 	}
 }
 
+// IsTopic check if message format is topic for FCM
+// ref: https://firebase.google.com/docs/cloud-messaging/send-message#topic-http-post-request
+func (p *PushNotification) IsTopic() bool {
+	return (p.Platform == PlatFormAndroid && p.To != "" && strings.HasPrefix(p.To, "/topics/")) ||
+		p.Condition != ""
+}
+
 // CheckMessage for check request message
 func CheckMessage(req PushNotification) error {
 	var msg string
 
-	if len(req.Tokens) == 0 {
+	// ignore send topic mesaage from FCM
+	if !req.IsTopic() && len(req.Tokens) == 0 && len(req.To) == 0 {
 		msg = "the message must specify at least one registration ID"
 		LogAccess.Debug(msg)
 		return errors.New(msg)
@@ -158,13 +176,15 @@ func CheckPushConf() error {
 	}
 
 	if PushConf.Ios.Enabled {
-		if PushConf.Ios.KeyPath == "" {
-			return errors.New("Missing iOS certificate path")
+		if PushConf.Ios.KeyPath == "" && PushConf.Ios.KeyBase64 == "" {
+			return errors.New("Missing iOS certificate key")
 		}
 
 		// check certificate file exist
-		if _, err := os.Stat(PushConf.Ios.KeyPath); os.IsNotExist(err) {
-			return errors.New("certificate file does not exist")
+		if PushConf.Ios.KeyPath != "" {
+			if _, err := os.Stat(PushConf.Ios.KeyPath); os.IsNotExist(err) {
+				return errors.New("certificate file does not exist")
+			}
 		}
 	}
 

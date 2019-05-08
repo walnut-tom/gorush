@@ -1,8 +1,6 @@
 package config
 
 import (
-	"io/ioutil"
-	"log"
 	"os"
 	"runtime"
 	"testing"
@@ -14,29 +12,7 @@ import (
 // Test file is missing
 func TestMissingFile(t *testing.T) {
 	filename := "test"
-	_, err := LoadConfYaml(filename)
-
-	assert.NotNil(t, err)
-}
-
-// Test wrong json format
-func TestWrongYAMLormat(t *testing.T) {
-	content := []byte(`Wrong format`)
-
-	filename := "tempfile"
-
-	if err := ioutil.WriteFile(filename, content, 0644); err != nil {
-		log.Fatalf("WriteFile %s: %v", filename, err)
-	}
-
-	// clean up
-	defer func() {
-		err := os.Remove(filename)
-		assert.Nil(t, err)
-	}()
-
-	// parse JSON format error
-	_, err := LoadConfYaml(filename)
+	_, err := LoadConf(filename)
 
 	assert.NotNil(t, err)
 }
@@ -48,11 +24,14 @@ type ConfigTestSuite struct {
 }
 
 func (suite *ConfigTestSuite) SetupTest() {
-	suite.ConfGorushDefault = BuildDefaultPushConf()
 	var err error
-	suite.ConfGorush, err = LoadConfYaml("config.yml")
+	suite.ConfGorushDefault, err = LoadConf("")
 	if err != nil {
-		panic("failed to load config.yml")
+		panic("failed to load default config.yml")
+	}
+	suite.ConfGorush, err = LoadConf("testdata/config.yml")
+	if err != nil {
+		panic("failed to load config.yml from file")
 	}
 }
 
@@ -68,12 +47,14 @@ func (suite *ConfigTestSuite) TestValidateConfDefault() {
 	assert.Equal(suite.T(), false, suite.ConfGorushDefault.Core.SSL)
 	assert.Equal(suite.T(), "cert.pem", suite.ConfGorushDefault.Core.CertPath)
 	assert.Equal(suite.T(), "key.pem", suite.ConfGorushDefault.Core.KeyPath)
+	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Core.KeyBase64)
+	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Core.CertBase64)
 	assert.Equal(suite.T(), int64(100), suite.ConfGorushDefault.Core.MaxNotification)
 	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Core.HTTPProxy)
 	// Pid
 	assert.Equal(suite.T(), false, suite.ConfGorushDefault.Core.PID.Enabled)
 	assert.Equal(suite.T(), "gorush.pid", suite.ConfGorushDefault.Core.PID.Path)
-	assert.Equal(suite.T(), false, suite.ConfGorushDefault.Core.PID.Override)
+	assert.Equal(suite.T(), true, suite.ConfGorushDefault.Core.PID.Override)
 	assert.Equal(suite.T(), false, suite.ConfGorushDefault.Core.AutoTLS.Enabled)
 	assert.Equal(suite.T(), ".cache", suite.ConfGorushDefault.Core.AutoTLS.Folder)
 	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Core.AutoTLS.Host)
@@ -85,18 +66,23 @@ func (suite *ConfigTestSuite) TestValidateConfDefault() {
 	assert.Equal(suite.T(), "/api/config", suite.ConfGorushDefault.API.ConfigURI)
 	assert.Equal(suite.T(), "/sys/stats", suite.ConfGorushDefault.API.SysStatURI)
 	assert.Equal(suite.T(), "/metrics", suite.ConfGorushDefault.API.MetricURI)
+	assert.Equal(suite.T(), "/healthz", suite.ConfGorushDefault.API.HealthURI)
 
 	// Android
-	assert.Equal(suite.T(), false, suite.ConfGorushDefault.Android.Enabled)
-	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Android.APIKey)
+	assert.Equal(suite.T(), true, suite.ConfGorushDefault.Android.Enabled)
+	assert.Equal(suite.T(), "YOUR_API_KEY", suite.ConfGorushDefault.Android.APIKey)
 	assert.Equal(suite.T(), 0, suite.ConfGorushDefault.Android.MaxRetry)
 
 	// iOS
 	assert.Equal(suite.T(), false, suite.ConfGorushDefault.Ios.Enabled)
-	assert.Equal(suite.T(), "key.pem", suite.ConfGorushDefault.Ios.KeyPath)
+	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Ios.KeyPath)
+	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Ios.KeyBase64)
+	assert.Equal(suite.T(), "pem", suite.ConfGorushDefault.Ios.KeyType)
 	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Ios.Password)
 	assert.Equal(suite.T(), false, suite.ConfGorushDefault.Ios.Production)
 	assert.Equal(suite.T(), 0, suite.ConfGorushDefault.Ios.MaxRetry)
+	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Ios.KeyID)
+	assert.Equal(suite.T(), "", suite.ConfGorushDefault.Ios.TeamID)
 
 	// log
 	assert.Equal(suite.T(), "string", suite.ConfGorushDefault.Log.Format)
@@ -119,7 +105,7 @@ func (suite *ConfigTestSuite) TestValidateConfDefault() {
 
 	// gRPC
 	assert.Equal(suite.T(), false, suite.ConfGorushDefault.GRPC.Enabled)
-	assert.Equal(suite.T(), "50051", suite.ConfGorushDefault.GRPC.Port)
+	assert.Equal(suite.T(), "9000", suite.ConfGorushDefault.GRPC.Port)
 }
 
 func (suite *ConfigTestSuite) TestValidateConf() {
@@ -133,6 +119,8 @@ func (suite *ConfigTestSuite) TestValidateConf() {
 	assert.Equal(suite.T(), false, suite.ConfGorush.Core.SSL)
 	assert.Equal(suite.T(), "cert.pem", suite.ConfGorush.Core.CertPath)
 	assert.Equal(suite.T(), "key.pem", suite.ConfGorush.Core.KeyPath)
+	assert.Equal(suite.T(), "", suite.ConfGorush.Core.CertBase64)
+	assert.Equal(suite.T(), "", suite.ConfGorush.Core.KeyBase64)
 	assert.Equal(suite.T(), int64(100), suite.ConfGorush.Core.MaxNotification)
 	assert.Equal(suite.T(), "", suite.ConfGorush.Core.HTTPProxy)
 	// Pid
@@ -150,6 +138,7 @@ func (suite *ConfigTestSuite) TestValidateConf() {
 	assert.Equal(suite.T(), "/api/config", suite.ConfGorush.API.ConfigURI)
 	assert.Equal(suite.T(), "/sys/stats", suite.ConfGorush.API.SysStatURI)
 	assert.Equal(suite.T(), "/metrics", suite.ConfGorush.API.MetricURI)
+	assert.Equal(suite.T(), "/healthz", suite.ConfGorush.API.HealthURI)
 
 	// Android
 	assert.Equal(suite.T(), true, suite.ConfGorush.Android.Enabled)
@@ -159,9 +148,13 @@ func (suite *ConfigTestSuite) TestValidateConf() {
 	// iOS
 	assert.Equal(suite.T(), false, suite.ConfGorush.Ios.Enabled)
 	assert.Equal(suite.T(), "key.pem", suite.ConfGorush.Ios.KeyPath)
+	assert.Equal(suite.T(), "", suite.ConfGorush.Ios.KeyBase64)
+	assert.Equal(suite.T(), "pem", suite.ConfGorush.Ios.KeyType)
 	assert.Equal(suite.T(), "", suite.ConfGorush.Ios.Password)
 	assert.Equal(suite.T(), false, suite.ConfGorush.Ios.Production)
 	assert.Equal(suite.T(), 0, suite.ConfGorush.Ios.MaxRetry)
+	assert.Equal(suite.T(), "", suite.ConfGorush.Ios.KeyID)
+	assert.Equal(suite.T(), "", suite.ConfGorush.Ios.TeamID)
 
 	// log
 	assert.Equal(suite.T(), "string", suite.ConfGorush.Log.Format)
@@ -184,9 +177,34 @@ func (suite *ConfigTestSuite) TestValidateConf() {
 
 	// gRPC
 	assert.Equal(suite.T(), false, suite.ConfGorush.GRPC.Enabled)
-	assert.Equal(suite.T(), "50051", suite.ConfGorush.GRPC.Port)
+	assert.Equal(suite.T(), "9000", suite.ConfGorush.GRPC.Port)
 }
 
 func TestConfigTestSuite(t *testing.T) {
 	suite.Run(t, new(ConfigTestSuite))
+}
+
+func TestLoadConfigFromEnv(t *testing.T) {
+	os.Setenv("GORUSH_CORE_PORT", "9001")
+	os.Setenv("GORUSH_GRPC_ENABLED", "true")
+	os.Setenv("GORUSH_CORE_MAX_NOTIFICATION", "200")
+	os.Setenv("GORUSH_IOS_KEY_ID", "ABC123DEFG")
+	os.Setenv("GORUSH_IOS_TEAM_ID", "DEF123GHIJ")
+	os.Setenv("GORUSH_API_HEALTH_URI", "/healthz")
+	ConfGorush, err := LoadConf("testdata/config.yml")
+	if err != nil {
+		panic("failed to load config.yml from file")
+	}
+	assert.Equal(t, "9001", ConfGorush.Core.Port)
+	assert.Equal(t, int64(200), ConfGorush.Core.MaxNotification)
+	assert.True(t, ConfGorush.GRPC.Enabled)
+	assert.Equal(t, "ABC123DEFG", ConfGorush.Ios.KeyID)
+	assert.Equal(t, "DEF123GHIJ", ConfGorush.Ios.TeamID)
+	assert.Equal(t, "/healthz", ConfGorush.API.HealthURI)
+}
+
+func TestLoadWrongDefaultYAMLConfig(t *testing.T) {
+	defaultConf = []byte(`a`)
+	_, err := LoadConf("")
+	assert.Error(t, err)
 }

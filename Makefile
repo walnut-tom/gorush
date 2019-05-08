@@ -6,12 +6,11 @@ DEPLOY_ACCOUNT := appleboy
 DEPLOY_IMAGE := $(EXECUTABLE)
 GOFMT ?= gofmt "-s"
 
-TARGETS ?= linux darwin windows
+TARGETS ?= linux darwin windows openbsd
 ARCHS ?= amd64 386
-PACKAGES ?= $(shell $(GO) list ./... | grep -v /vendor/)
-GOFILES := $(shell find . -name "*.go" -type f -not -path "./vendor/*")
-SOURCES ?= $(shell find . -name "*.go" -type f)
-TAGS ?=
+PACKAGES ?= $(shell $(GO) list ./...)
+GOFILES := $(shell find . -name "*.go" -type f)
+TAGS ?= sqlite
 LDFLAGS ?= -X 'main.Version=$(VERSION)'
 TMPDIR := $(shell mktemp -d 2>/dev/null || mktemp -d -t 'tempdir')
 NODE_PROTOC_PLUGIN := $(shell which grpc_tools_node_protoc_plugin)
@@ -42,6 +41,7 @@ ifeq ($(ANDROID_TEST_TOKEN),)
 endif
 	@echo "Already set ANDROID_API_KEY and ANDROID_TEST_TOKEN globale variable."
 
+.PHONY: fmt
 fmt:
 	$(GOFMT) -w $(GOFILES)
 
@@ -57,42 +57,29 @@ fmt-check:
 vet:
 	$(GO) vet $(PACKAGES)
 
-deps:
-	$(GO) get github.com/campoy/embedmd
-
 embedmd:
+	@hash embedmd > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
+		$(GO) get -u github.com/campoy/embedmd; \
+	fi
 	embedmd -d *.md
 
-errcheck:
-	@hash errcheck > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		$(GO) get -u github.com/kisielk/errcheck; \
-	fi
-	errcheck $(PACKAGES)
-
 lint:
-	@hash golint > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		$(GO) get -u github.com/golang/lint/golint; \
+	@hash revive > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
+		$(GO) get -u github.com/mgechev/revive; \
 	fi
-	for PKG in $(PACKAGES); do golint -set_exit_status $$PKG || exit 1; done;
+	revive -config .revive.toml ./... || exit 1
 
-unconvert:
-	@hash unconvert > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		$(GO) get -u github.com/mdempsky/unconvert; \
-	fi
-	for PKG in $(PACKAGES); do unconvert -v $$PKG || exit 1; done;
-
-# Install from source.
-install: $(SOURCES)
-	$(GO) install -v -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)'
-	@echo "==> Installed gorush ${GOPATH}/bin/gorush"
 .PHONY: install
+install: $(GOFILES)
+	$(GO) install -v -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)'
+	@echo "\n==>\033[32m Installed gorush to ${GOPATH}/bin/gorush\033[m"
 
-# build from source
-build: $(EXECUTABLE)
 .PHONY: build
+build: $(EXECUTABLE)
 
-$(EXECUTABLE): $(SOURCES)
-	$(GO) build -v -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o bin/$@
+.PHONY: $(EXECUTABLE)
+$(EXECUTABLE): $(GOFILES)
+	$(GO) build -v -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o release/$@
 
 .PHONY: misspell-check
 misspell-check:
@@ -108,44 +95,11 @@ misspell:
 	fi
 	misspell -w $(GOFILES)
 
-test: fmt-check
-	for PKG in $(PACKAGES); do $(GO) test -v -cover -coverprofile $$GOPATH/src/$$PKG/coverage.txt $$PKG || exit 1; done;
+.PHONY: test
+test: init fmt-check
+	@$(GO) test -v -cover -tags $(TAGS) -coverprofile coverage.txt $(PACKAGES) && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
-.PHONY: test-vendor
-test-vendor:
-	@hash govendor > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		$(GO) get -u github.com/kardianos/govendor; \
-	fi
-	govendor list +unused | tee "$(TMPDIR)/wc-gitea-unused"
-	[ $$(cat "$(TMPDIR)/wc-gitea-unused" | wc -l) -eq 0 ] || echo "Warning: /!\\ Some vendor are not used /!\\"
-
-	govendor list +outside | tee "$(TMPDIR)/wc-gitea-outside"
-	[ $$(cat "$(TMPDIR)/wc-gitea-outside" | wc -l) -eq 0 ] || exit 1
-
-	govendor status || exit 1
-
-redis_test: init
-	$(GO) test -v -cover ./storage/redis/...
-
-boltdb_test: init
-	$(GO) test -v -cover ./storage/boltdb/...
-
-memory_test: init
-	$(GO) test -v -cover ./storage/memory/...
-
-buntdb_test: init
-	$(GO) test -v -cover ./storage/buntdb/...
-
-leveldb_test: init
-	$(GO) test -v -cover ./storage/leveldb/...
-
-config_test: init
-	$(GO) test -v -cover ./config/...
-
-html:
-	$(GO) tool cover -html=.cover/coverage.txt
-
-release: release-dirs release-build release-copy release-check
+release: release-dirs release-build release-copy release-compress release-check
 
 release-dirs:
 	mkdir -p $(DIST)/binaries $(DIST)/release
@@ -156,20 +110,33 @@ release-build:
 	fi
 	gox -os="$(TARGETS)" -arch="$(ARCHS)" -tags="$(TAGS)" -ldflags="$(EXTLDFLAGS)-s -w $(LDFLAGS)" -output="$(DIST)/binaries/$(EXECUTABLE)-$(VERSION)-{{.OS}}-{{.Arch}}"
 
+.PHONY: release-compress
+release-compress:
+	@hash gxz > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
+		$(GO) get -u github.com/ulikunitz/xz/cmd/gxz; \
+	fi
+	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "compressing $${file}" && gxz -k -9 $${file}; done;
+
 release-copy:
 	$(foreach file,$(wildcard $(DIST)/binaries/$(EXECUTABLE)-*),cp $(file) $(DIST)/release/$(notdir $(file));)
 
 release-check:
 	cd $(DIST)/release; $(foreach file,$(wildcard $(DIST)/release/$(EXECUTABLE)-*),sha256sum $(notdir $(file)) > $(notdir $(file)).sha256;)
 
-docker_build:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -a -tags '$(TAGS)' -ldflags "$(EXTLDFLAGS)-s -w $(LDFLAGS)" -o bin/$(EXECUTABLE)
+build_linux_amd64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o release/linux/amd64/$(DEPLOY_IMAGE)
 
-docker_build_arm64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -a -tags '$(TAGS)' -ldflags "$(EXTLDFLAGS)-s -w $(LDFLAGS)" -o bin/$(EXECUTABLE)-arm64
+build_linux_i386:
+	CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -a -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o release/linux/i386/$(DEPLOY_IMAGE)
 
-docker_build_arm:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build -a -tags '$(TAGS)' -ldflags "$(EXTLDFLAGS)-s -w $(LDFLAGS)" -o bin/$(EXECUTABLE)-arm
+build_linux_arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -a -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o release/linux/arm64/$(DEPLOY_IMAGE)
+
+build_linux_arm:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -a -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o release/linux/arm/$(DEPLOY_IMAGE)
+
+build_linux_lambda:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -tags 'lambda' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o release/linux/lambda/$(DEPLOY_IMAGE)
 
 docker_image:
 	docker build -t $(DEPLOY_ACCOUNT)/$(DEPLOY_IMAGE) -f Dockerfile .
@@ -185,18 +152,20 @@ endif
 	docker push $(DEPLOY_ACCOUNT)/$(EXECUTABLE):$(tag)
 
 clean:
-	$(GO) clean -x -i ./...
+	$(GO) clean -modcache -x -i ./...
 	find . -name coverage.txt -delete
 	find . -name *.tar.gz -delete
 	find . -name *.db -delete
-	-rm -rf bin/* \
-		.cover
+	-rm -rf release dist .cover
 
 rpc/example/node/gorush_*_pb.js: rpc/proto/gorush.proto
+	@hash grpc_tools_node_protoc_plugin > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
+		npm install -g grpc-tools; \
+	fi
 	protoc -I rpc/proto rpc/proto/gorush.proto --js_out=import_style=commonjs,binary:rpc/example/node/ --grpc_out=rpc/example/node/ --plugin=protoc-gen-grpc=$(NODE_PROTOC_PLUGIN)
 
 rpc/proto/gorush.pb.go: rpc/proto/gorush.proto
-	protoc -I rpc/proto rpc/proto/gorush.proto --go_out=plugins=grpc:rpc/proto
+	protoc -I rpc/proto -I ${PWD}/vendor/github.com/gogo/protobuf/proto rpc/proto/gorush.proto --gogofaster_out=plugins=grpc:rpc/proto
 
 generate_proto: rpc/proto/gorush.pb.go rpc/example/node/gorush_*_pb.js
 

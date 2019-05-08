@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,7 @@ func main() {
 	opts := config.ConfYaml{}
 
 	var (
+		ping        bool
 		showVersion bool
 		configFile  string
 		topic       string
@@ -56,15 +58,12 @@ func main() {
 	flag.BoolVar(&opts.Ios.Production, "production", false, "production mode in iOS")
 	flag.StringVar(&topic, "topic", "", "apns topic in iOS")
 	flag.StringVar(&proxy, "proxy", "", "http proxy url")
+	flag.BoolVar(&ping, "ping", false, "ping server")
 
 	flag.Usage = usage
 	flag.Parse()
 
 	gorush.SetVersion(Version)
-
-	if len(os.Args) < 2 {
-		usage()
-	}
 
 	// Show version and exit
 	if showVersion {
@@ -75,17 +74,11 @@ func main() {
 	var err error
 
 	// set default parameters.
-	gorush.PushConf = config.BuildDefaultPushConf()
+	gorush.PushConf, err = config.LoadConf(configFile)
+	if err != nil {
+		log.Printf("Load yaml config file error: '%v'", err)
 
-	// load user define config.
-	if configFile != "" {
-		gorush.PushConf, err = config.LoadConfYaml(configFile)
-
-		if err != nil {
-			log.Printf("Load yaml config file error: '%v'", err)
-
-			return
-		}
+		return
 	}
 
 	if opts.Ios.KeyPath != "" {
@@ -117,8 +110,7 @@ func main() {
 	}
 
 	if err = gorush.InitLog(); err != nil {
-		log.Println(err)
-		return
+		log.Fatalf("Can't load log module, error: %v", err)
 	}
 
 	// set http proxy for GCM
@@ -126,24 +118,40 @@ func main() {
 		err = gorush.SetProxy(proxy)
 
 		if err != nil {
-			gorush.LogError.Fatal("Set Proxy error: ", err)
+			gorush.LogError.Fatalf("Set Proxy error: %v", err)
 		}
 	} else if gorush.PushConf.Core.HTTPProxy != "" {
 		err = gorush.SetProxy(gorush.PushConf.Core.HTTPProxy)
 
 		if err != nil {
-			gorush.LogError.Fatal("Set Proxy error: ", err)
+			gorush.LogError.Fatalf("Set Proxy error: %v", err)
 		}
+	}
+
+	if ping {
+		if err := pinger(); err != nil {
+			gorush.LogError.Warnf("ping server error: %v", err)
+		}
+		return
 	}
 
 	// send android notification
 	if opts.Android.Enabled {
 		gorush.PushConf.Android.Enabled = opts.Android.Enabled
 		req := gorush.PushNotification{
-			Tokens:   []string{token},
 			Platform: gorush.PlatFormAndroid,
 			Message:  message,
 			Title:    title,
+		}
+
+		// send message to single device
+		if token != "" {
+			req.Tokens = []string{token}
+		}
+
+		// send topic message
+		if topic != "" {
+			req.To = topic
 		}
 
 		err := gorush.CheckMessage(req)
@@ -161,7 +169,7 @@ func main() {
 		return
 	}
 
-	// send android notification
+	// send ios notification
 	if opts.Ios.Enabled {
 		if opts.Ios.Production {
 			gorush.PushConf.Ios.Production = opts.Ios.Production
@@ -169,12 +177,17 @@ func main() {
 
 		gorush.PushConf.Ios.Enabled = opts.Ios.Enabled
 		req := gorush.PushNotification{
-			Tokens:   []string{token},
 			Platform: gorush.PlatFormIos,
 			Message:  message,
 			Title:    title,
 		}
 
+		// send message to single device
+		if token != "" {
+			req.Tokens = []string{token}
+		}
+
+		// send topic message
 		if topic != "" {
 			req.Topic = topic
 		}
@@ -219,23 +232,15 @@ func main() {
 
 	var g errgroup.Group
 
-	g.Go(func() error {
-		return gorush.InitAPNSClient()
-	})
+	g.Go(gorush.InitAPNSClient)
 
 	g.Go(func() error {
 		_, err := gorush.InitFCMClient(gorush.PushConf.Android.APIKey)
 		return err
 	})
 
-	g.Go(func() error {
-		// Run httpd server
-		return gorush.RunHTTPServer()
-	})
-	g.Go(func() error {
-		// Run gRPC internal server
-		return rpc.RunGRPCServer()
-	})
+	g.Go(gorush.RunHTTPServer) // Run httpd server
+	g.Go(rpc.RunGRPCServer)    // Run gRPC internal server
 
 	if err = g.Wait(); err != nil {
 		gorush.LogError.Fatal(err)
@@ -266,16 +271,17 @@ Server Options:
     --proxy <proxy>                  Proxy URL (only for GCM)
     --pid <pid path>                 Process identifier path
     --redis-addr <redis addr>        Redis addr (default: localhost:6379)
+    --ping                           healthy check command for container
 iOS Options:
     -i, --key <file>                 certificate key file path
     -P, --password <password>        certificate key password
-    --topic <topic>                  iOS topic
     --ios                            enabled iOS (default: false)
     --production                     iOS production mode (default: false)
 Android Options:
     -k, --apikey <api_key>           Android API Key
     --android                        enabled android (default: false)
 Common Options:
+    --topic <topic>                  iOS or Android topic message
     -h, --help                       Show this message
     -v, --version                    Show version
 `
@@ -284,6 +290,20 @@ Common Options:
 func usage() {
 	fmt.Printf("%s\n", usageStr)
 	os.Exit(0)
+}
+
+// handles pinging the endpoint and returns an error if the
+// agent is in an unhealthy state.
+func pinger() error {
+	resp, err := http.Get("http://localhost:" + gorush.PushConf.Core.Port + gorush.PushConf.API.HealthURI)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("server returned non-200 status code")
+	}
+	return nil
 }
 
 func createPIDFile() error {

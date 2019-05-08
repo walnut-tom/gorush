@@ -21,7 +21,7 @@ func GetVersion() string {
 
 // PrintGoRushVersion provide print server engine
 func PrintGoRushVersion() {
-	fmt.Printf(`GoRush %s, Compiler: %s %s, Copyright (C) 2016 Bo-Yi Wu, Inc.`,
+	fmt.Printf(`GoRush %s, Compiler: %s %s, Copyright (C) 2019 Bo-Yi Wu, Inc.`,
 		version,
 		runtime.Compiler,
 		runtime.Version())
@@ -32,7 +32,7 @@ func PrintGoRushVersion() {
 func VersionMiddleware() gin.HandlerFunc {
 	// Set out header value for each response
 	return func(c *gin.Context) {
-		c.Header("X-DRONE-VERSION", version)
+		c.Header("X-GORUSH-VERSION", version)
 		c.Next()
 	}
 }

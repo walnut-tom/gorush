@@ -1,40 +1,99 @@
 package gorush
 
 import (
+	"crypto/ecdsa"
+	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"path/filepath"
 	"time"
 
-	apns "github.com/sideshow/apns2"
+	"github.com/mitchellh/mapstructure"
+	"github.com/sideshow/apns2"
 	"github.com/sideshow/apns2/certificate"
 	"github.com/sideshow/apns2/payload"
+	"github.com/sideshow/apns2/token"
 )
+
+// Sound sets the aps sound on the payload.
+type Sound struct {
+	Critical int     `json:"critical,omitempty"`
+	Name     string  `json:"name,omitempty"`
+	Volume   float32 `json:"volume,omitempty"`
+}
 
 // InitAPNSClient use for initialize APNs Client.
 func InitAPNSClient() error {
 	if PushConf.Ios.Enabled {
 		var err error
-		ext := filepath.Ext(PushConf.Ios.KeyPath)
+		var authKey *ecdsa.PrivateKey
+		var certificateKey tls.Certificate
+		var ext string
 
-		switch ext {
-		case ".p12":
-			CertificatePemIos, err = certificate.FromP12File(PushConf.Ios.KeyPath, PushConf.Ios.Password)
-		case ".pem":
-			CertificatePemIos, err = certificate.FromPemFile(PushConf.Ios.KeyPath, PushConf.Ios.Password)
-		default:
-			err = errors.New("wrong certificate key extension")
+		if PushConf.Ios.KeyPath != "" {
+			ext = filepath.Ext(PushConf.Ios.KeyPath)
+
+			switch ext {
+			case ".p12":
+				certificateKey, err = certificate.FromP12File(PushConf.Ios.KeyPath, PushConf.Ios.Password)
+			case ".pem":
+				certificateKey, err = certificate.FromPemFile(PushConf.Ios.KeyPath, PushConf.Ios.Password)
+			case ".p8":
+				authKey, err = token.AuthKeyFromFile(PushConf.Ios.KeyPath)
+			default:
+				err = errors.New("wrong certificate key extension")
+			}
+
+			if err != nil {
+				LogError.Error("Cert Error:", err.Error())
+
+				return err
+			}
+		} else if PushConf.Ios.KeyBase64 != "" {
+			ext = "." + PushConf.Ios.KeyType
+			key, err := base64.StdEncoding.DecodeString(PushConf.Ios.KeyBase64)
+			if err != nil {
+				LogError.Error("base64 decode error:", err.Error())
+
+				return err
+			}
+			switch ext {
+			case ".p12":
+				certificateKey, err = certificate.FromP12Bytes(key, PushConf.Ios.Password)
+			case ".pem":
+				certificateKey, err = certificate.FromPemBytes(key, PushConf.Ios.Password)
+			case ".p8":
+				authKey, err = token.AuthKeyFromBytes(key)
+			default:
+				err = errors.New("wrong certificate key type")
+			}
+
+			if err != nil {
+				LogError.Error("Cert Error:", err.Error())
+
+				return err
+			}
 		}
 
-		if err != nil {
-			LogError.Error("Cert Error:", err.Error())
-
-			return err
-		}
-
-		if PushConf.Ios.Production {
-			ApnsClient = apns.NewClient(CertificatePemIos).Production()
+		if ext == ".p8" && PushConf.Ios.KeyID != "" && PushConf.Ios.TeamID != "" {
+			token := &token.Token{
+				AuthKey: authKey,
+				// KeyID from developer account (Certificates, Identifiers & Profiles -> Keys)
+				KeyID: PushConf.Ios.KeyID,
+				// TeamID from developer account (View Account -> Membership)
+				TeamID: PushConf.Ios.TeamID,
+			}
+			if PushConf.Ios.Production {
+				ApnsClient = apns2.NewTokenClient(token).Production()
+			} else {
+				ApnsClient = apns2.NewTokenClient(token).Development()
+			}
 		} else {
-			ApnsClient = apns.NewClient(CertificatePemIos).Development()
+			if PushConf.Ios.Production {
+				ApnsClient = apns2.NewClient(certificateKey).Production()
+			} else {
+				ApnsClient = apns2.NewClient(certificateKey).Development()
+			}
 		}
 	}
 
@@ -90,9 +149,16 @@ func iosAlertDictionary(payload *payload.Payload, req PushNotification) *payload
 	}
 
 	// General
-
 	if len(req.Category) > 0 {
 		payload.Category(req.Category)
+	}
+
+	if len(req.Alert.SummaryArg) > 0 {
+		payload.AlertSummaryArg(req.Alert.SummaryArg)
+	}
+
+	if req.Alert.SummaryArgCount > 0 {
+		payload.AlertSummaryArgCount(req.Alert.SummaryArgCount)
 	}
 
 	return payload
@@ -101,10 +167,11 @@ func iosAlertDictionary(payload *payload.Payload, req PushNotification) *payload
 // GetIOSNotification use for define iOS notification.
 // The iOS Notification Payload
 // ref: https://developer.apple.com/library/content/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/PayloadKeyReference.html#//apple_ref/doc/uid/TP40008194-CH17-SW1
-func GetIOSNotification(req PushNotification) *apns.Notification {
-	notification := &apns.Notification{
-		ApnsID: req.ApnsID,
-		Topic:  req.Topic,
+func GetIOSNotification(req PushNotification) *apns2.Notification {
+	notification := &apns2.Notification{
+		ApnsID:     req.ApnsID,
+		Topic:      req.Topic,
+		CollapseID: req.CollapseID,
 	}
 
 	if req.Expiration > 0 {
@@ -112,7 +179,7 @@ func GetIOSNotification(req PushNotification) *apns.Notification {
 	}
 
 	if len(req.Priority) > 0 && req.Priority == "normal" {
-		notification.Priority = apns.PriorityLow
+		notification.Priority = apns2.PriorityLow
 	}
 
 	payload := payload.NewPayload()
@@ -131,8 +198,25 @@ func GetIOSNotification(req PushNotification) *apns.Notification {
 		payload.MutableContent()
 	}
 
-	if len(req.Sound) > 0 {
-		payload.Sound(req.Sound)
+	switch req.Sound.(type) {
+	// from http request binding
+	case map[string]interface{}:
+		result := &Sound{}
+		_ = mapstructure.Decode(req.Sound, &result)
+		payload.Sound(result)
+	// from http request binding for non critical alerts
+	case string:
+		payload.Sound(&req.Sound)
+	case Sound:
+		payload.Sound(&req.Sound)
+	}
+
+	if len(req.SoundName) > 0 {
+		payload.SoundName(req.SoundName)
+	}
+
+	if req.SoundVolume > 0 {
+		payload.SoundVolume(req.SoundVolume)
 	}
 
 	if req.ContentAvailable {
@@ -141,6 +225,10 @@ func GetIOSNotification(req PushNotification) *apns.Notification {
 
 	if len(req.URLArgs) > 0 {
 		payload.URLArgs(req.URLArgs)
+	}
+
+	if len(req.ThreadID) > 0 {
+		payload.ThreadID(req.ThreadID)
 	}
 
 	for k, v := range req.Data {
@@ -152,6 +240,21 @@ func GetIOSNotification(req PushNotification) *apns.Notification {
 	notification.Payload = payload
 
 	return notification
+}
+
+func getApnsClient(req PushNotification) (client *apns2.Client) {
+	if req.Production {
+		client = ApnsClient.Production()
+	} else if req.Development {
+		client = ApnsClient.Development()
+	} else {
+		if PushConf.Ios.Production {
+			client = ApnsClient.Production()
+		} else {
+			client = ApnsClient.Development()
+		}
+	}
+	return
 }
 
 // PushToIOS provide send notification to APNs server.
@@ -177,12 +280,13 @@ Retry:
 	)
 
 	notification := GetIOSNotification(req)
+	client := getApnsClient(req)
 
 	for _, token := range req.Tokens {
 		notification.DeviceToken = token
 
 		// send ios notification
-		res, err := ApnsClient.Push(notification)
+		res, err := client.Push(notification)
 
 		if err != nil {
 			// apns server error
